@@ -1,6 +1,6 @@
 [motor]
 # UI default for "speed step (mps)"
-speed_step_mps = 0.50
+speed_step_mps = 0.30
 # UI default for "publish Hz" (motor/cmd publish rate while a key is held)
 publish_hz = 10.0
 # UI default for "deadman ms"

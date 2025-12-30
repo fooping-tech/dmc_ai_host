@@ -3,3 +3,4 @@ PySide6
 pyqtgraph
 numpy
 pillow
+tomli; python_version < "3.11"
