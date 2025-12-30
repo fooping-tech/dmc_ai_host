@@ -27,9 +27,25 @@ json5設定ファイルを使う例:
 
     python remote_zenoh_ui.py --robot-id <ROBOT_ID> --zenoh-config ./zenoh_remote.json5
 
+## config.toml（UIのデフォルト設定）
+
+`remote_zenoh_ui.py` は、カレントディレクトリに `config.toml` があれば自動で読み込み、UIの初期値に反映します。
+
+- 例: `config.toml.example` を `config.toml` にコピーして編集
+- 明示的に指定: `--config /path/to/config.toml`
+- 自動読み込みを無効化: `--no-config`
+
 publish しているメッセージをターミナルに出したい場合:
 
     python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub
+
+モータ指令を「全て」確認したい場合（止まる瞬間の揺れ等の解析用、かなり大量に出ます）:
+
+    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub-motor-all
+
+モータの publish 周期（実測）を確認したい場合:
+
+    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-motor-period
 
 ## 操作（キーボード）
 

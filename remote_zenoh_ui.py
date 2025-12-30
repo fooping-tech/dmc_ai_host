@@ -11,6 +11,140 @@ from pathlib import Path
 from typing import Any, Optional
 
 
+def _load_toml_file(path: Path) -> dict[str, Any]:
+    try:
+        import tomllib  # py3.11+
+    except Exception:  # pragma: no cover
+        try:
+            import tomli as tomllib  # type: ignore[assignment]
+        except Exception as e:  # pragma: no cover
+            raise SystemExit(
+                "TOML config requested but TOML parser not available.\n"
+                "Use Python 3.11+ (tomllib) or `pip install tomli`."
+            ) from e
+
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"config not found: {path}")
+    except Exception as e:
+        raise SystemExit(f"failed to parse config: {path} ({e})") from e
+
+    if not isinstance(data, dict):
+        raise SystemExit(f"invalid config (expected TOML table at root): {path}")
+    return data
+
+
+def _toml_get(obj: Any, keys: tuple[str, ...], default: Any) -> Any:
+    cur = obj
+    for k in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(k)
+    return default if cur is None else cur
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, float(v)))
+
+
+def _clamp_int(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, int(v)))
+
+
+@dataclass(frozen=True)
+class UIConfig:
+    motor_speed_step_mps: float = 0.50
+    motor_publish_hz: float = 20.0
+    motor_deadman_ms: int = 300
+    lidar_update_hz: float = 10.0
+    lidar_max_points: int = 5000
+    lidar_range_m: float = 1.0
+    lidar_flip_y: bool = False
+
+
+def _load_ui_config(path: Optional[Path]) -> UIConfig:
+    """
+    Reads `config.toml` and returns UI defaults.
+
+    Supported TOML keys:
+      [motor] speed_step_mps, publish_hz, deadman_ms
+      [lidar] update_hz, max_points, range_m, flip_y
+    """
+    if path is None:
+        return UIConfig()
+
+    data = _load_toml_file(path)
+    motor = _toml_get(data, ("motor",), {})
+    lidar = _toml_get(data, ("lidar",), {})
+
+    def _f(x: Any, default: float) -> float:
+        try:
+            return float(x)
+        except Exception:
+            return float(default)
+
+    def _i(x: Any, default: int) -> int:
+        try:
+            return int(x)
+        except Exception:
+            return int(default)
+
+    def _b(x: Any, default: bool) -> bool:
+        if isinstance(x, bool):
+            return x
+        return bool(default)
+
+    speed_step = _clamp(
+        _f(
+            _toml_get(motor, ("speed_step_mps",), UIConfig.motor_speed_step_mps),
+            UIConfig.motor_speed_step_mps,
+        ),
+        0.0,
+        2.0,
+    )
+    publish_hz = _clamp(
+        _f(_toml_get(motor, ("publish_hz",), UIConfig.motor_publish_hz), UIConfig.motor_publish_hz),
+        1.0,
+        60.0,
+    )
+    deadman = _clamp_int(
+        _i(_toml_get(motor, ("deadman_ms",), UIConfig.motor_deadman_ms), UIConfig.motor_deadman_ms),
+        50,
+        2000,
+    )
+
+    lidar_update_hz = _clamp(
+        _f(_toml_get(lidar, ("update_hz",), UIConfig.lidar_update_hz), UIConfig.lidar_update_hz),
+        1.0,
+        60.0,
+    )
+    lidar_max_points = _clamp_int(
+        _i(
+            _toml_get(lidar, ("max_points",), UIConfig.lidar_max_points),
+            UIConfig.lidar_max_points,
+        ),
+        100,
+        50000,
+    )
+    lidar_range_m = _clamp(
+        _f(_toml_get(lidar, ("range_m",), UIConfig.lidar_range_m), UIConfig.lidar_range_m),
+        0.0,
+        1.0,
+    )
+    lidar_flip_y = _b(_toml_get(lidar, ("flip_y",), UIConfig.lidar_flip_y), UIConfig.lidar_flip_y)
+
+    return UIConfig(
+        motor_speed_step_mps=speed_step,
+        motor_publish_hz=publish_hz,
+        motor_deadman_ms=deadman,
+        lidar_update_hz=lidar_update_hz,
+        lidar_max_points=lidar_max_points,
+        lidar_range_m=lidar_range_m,
+        lidar_flip_y=lidar_flip_y,
+    )
+
+
 def _key(robot_id: str, suffix: str) -> str:
     if not robot_id or "/" in robot_id:
         raise SystemExit("robot_id must be non-empty and must not contain '/'")
@@ -89,17 +223,18 @@ class MotorCommand:
     seq: int
     ts_ms: int
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "v_l": self.v_l,
+            "v_r": self.v_r,
+            "unit": self.unit,
+            "deadman_ms": int(self.deadman_ms),
+            "seq": int(self.seq),
+            "ts_ms": int(self.ts_ms),
+        }
+
     def to_bytes(self) -> bytes:
-        return json.dumps(
-            {
-                "v_l": self.v_l,
-                "v_r": self.v_r,
-                "unit": self.unit,
-                "deadman_ms": int(self.deadman_ms),
-                "seq": int(self.seq),
-                "ts_ms": int(self.ts_ms),
-            }
-        ).encode("utf-8")
+        return json.dumps(self.to_dict()).encode("utf-8")
 
 
 class ZenohClient:
@@ -126,6 +261,8 @@ class ZenohClient:
         key_oled = _key(self._robot_id, "oled/cmd")
         self._pub_motor = self._session.declare_publisher(key_motor)
         self._pub_oled = self._session.declare_publisher(key_oled)
+        self._key_motor = key_motor
+        self._key_oled = key_oled
         if self._print_publish:
             print(f"[pub] motor: {key_motor}", flush=True)
             print(f"[pub] oled : {key_oled}", flush=True)
@@ -226,13 +363,12 @@ class ZenohClient:
     def publish_motor_ex(self, cmd: MotorCommand, *, print_msg: Optional[bool]) -> None:
         if self._pub_motor is None:
             return
-        self._pub_motor.put(cmd.to_bytes())
+        payload = cmd.to_dict()
+        self._pub_motor.put(json.dumps(payload).encode("utf-8"))
         do_print = self._print_publish if print_msg is None else bool(print_msg)
         if do_print:
-            print(
-                f"[pub] motor seq={cmd.seq} v_l={cmd.v_l:+.3f} v_r={cmd.v_r:+.3f} deadman_ms={cmd.deadman_ms}",
-                flush=True,
-            )
+            key = getattr(self, "_key_motor", "motor/cmd")
+            print(f"[pub] {key} {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
     def publish_oled(self, text: str) -> None:
         self.publish_oled_ex(text, print_msg=None)
@@ -244,7 +380,8 @@ class ZenohClient:
         self._pub_oled.put(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         do_print = self._print_publish if print_msg is None else bool(print_msg)
         if do_print:
-            print(f"[pub] oled {json.dumps(payload, ensure_ascii=False)}", flush=True)
+            key = getattr(self, "_key_oled", "oled/cmd")
+            print(f"[pub] {key} {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
 
 def _get_by_path(obj: Any, path: str) -> Any:
@@ -377,7 +514,9 @@ def _extract_lidar_points(payload: Any) -> tuple[Optional[int], Optional[int], l
 
 
 class MainWindow:
-    def __init__(self, *, client: ZenohClient, bridge: _Bridge, args: argparse.Namespace) -> None:
+    def __init__(
+        self, *, client: ZenohClient, bridge: _Bridge, args: argparse.Namespace, ui_config: UIConfig
+    ) -> None:
         from PySide6.QtCore import QEvent, QObject, QTimer, Qt
         from PySide6.QtGui import QAction, QCloseEvent, QFont, QKeyEvent
         from PySide6.QtWidgets import (
@@ -415,14 +554,20 @@ class MainWindow:
         self._client = client
         self._bridge = bridge
         self._args = args
+        self._ui_config = ui_config
 
         self._seq = 0
         self._pressed: set[int] = set()
         self._last_nonzero = False
         self._closing = False
         self._print_publish = bool(getattr(args, "print_pub", False))
+        self._print_pub_motor_all = bool(getattr(args, "print_pub_motor_all", False))
         self._last_motor_print: Optional[tuple[float, float]] = None
         self._last_motor_print_t = 0.0
+        self._motor_last_pub_t: Optional[float] = None
+        self._motor_dt_s: deque[float] = deque(maxlen=200)
+        self._motor_period_last_print_t = 0.0
+        self._print_motor_period = bool(getattr(args, "print_motor_period", False))
 
         class _Win(QMainWindow):
             def __init__(self, owner: "MainWindow"):
@@ -465,22 +610,25 @@ class MainWindow:
         self._spin_step.setRange(0.0, 2.0)
         self._spin_step.setSingleStep(0.1)
         self._spin_step.setDecimals(3)
-        self._spin_step.setValue(0.50)
+        self._spin_step.setValue(float(self._ui_config.motor_speed_step_mps))
         motor_form.addRow("speed step (mps)", self._spin_step)
         self._spin_hz = QDoubleSpinBox()
         self._spin_hz.setRange(1.0, 60.0)
         self._spin_hz.setDecimals(1)
-        self._spin_hz.setValue(20.0)
+        self._spin_hz.setValue(float(self._ui_config.motor_publish_hz))
         motor_form.addRow("publish Hz", self._spin_hz)
         self._spin_deadman = QSpinBox()
         self._spin_deadman.setRange(50, 2000)
-        self._spin_deadman.setValue(300)
+        self._spin_deadman.setValue(int(self._ui_config.motor_deadman_ms))
         motor_form.addRow("deadman ms", self._spin_deadman)
         self._btn_stop = QPushButton("STOP (send zero)")
         motor_form.addRow(self._btn_stop)
         self._lbl_motor = QLabel("v_l=0.000 v_r=0.000")
         self._lbl_motor.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         motor_form.addRow("last cmd", self._lbl_motor)
+        self._lbl_motor_period = QLabel("dt=-- avg=--")
+        self._lbl_motor_period.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        motor_form.addRow("pub period", self._lbl_motor_period)
         left_layout.addWidget(motor_box)
 
         oled_box = QGroupBox("OLED")
@@ -513,16 +661,16 @@ class MainWindow:
         lidar_form = QFormLayout(lidar_box)
         self._spin_lidar_max_points = QSpinBox()
         self._spin_lidar_max_points.setRange(100, 50000)
-        self._spin_lidar_max_points.setValue(5000)
+        self._spin_lidar_max_points.setValue(int(self._ui_config.lidar_max_points))
         lidar_form.addRow("max points", self._spin_lidar_max_points)
         self._spin_lidar_range_m = QDoubleSpinBox()
         self._spin_lidar_range_m.setRange(0.0, 1.0)
         self._spin_lidar_range_m.setDecimals(2)
         self._spin_lidar_range_m.setSingleStep(0.5)
-        self._spin_lidar_range_m.setValue(1.0)
+        self._spin_lidar_range_m.setValue(float(self._ui_config.lidar_range_m))
         lidar_form.addRow("range max (m) (<=1.0)", self._spin_lidar_range_m)
         self._chk_lidar_flip_y = QCheckBox("flip Y (front/back)")
-        self._chk_lidar_flip_y.setChecked(False)
+        self._chk_lidar_flip_y.setChecked(bool(self._ui_config.lidar_flip_y))
         lidar_form.addRow(self._chk_lidar_flip_y)
         self._lbl_lidar = QLabel("scan: --")
         self._lbl_lidar.setFrameStyle(QFrame.Panel | QFrame.Sunken)
@@ -671,7 +819,7 @@ class MainWindow:
         self._lidar_last_scan: Optional[dict[str, Any]] = None
         self._lidar_timer = QTimer()
         self._lidar_timer.timeout.connect(self._tick_lidar)
-        self._lidar_timer.start(100)  # 10 Hz
+        self._lidar_timer.start(max(10, int(1000.0 / float(self._ui_config.lidar_update_hz))))
 
         # Open Zenoh now
         try:
@@ -825,9 +973,9 @@ class MainWindow:
         )
         self._seq += 1
         try:
-            # Avoid flooding the terminal: print only on change or <=1 Hz.
-            if self._print_publish:
-                now = time.monotonic()
+            now = time.monotonic()
+            # Avoid flooding the terminal: by default print only on change or <=1 Hz.
+            if self._print_publish and not self._print_pub_motor_all:
                 cur = (cmd.v_l, cmd.v_r)
                 if (cur != self._last_motor_print) or (now - self._last_motor_print_t >= 1.0):
                     self._last_motor_print = cur
@@ -835,10 +983,38 @@ class MainWindow:
                     self._client.publish_motor_ex(cmd, print_msg=True)
                 else:
                     self._client.publish_motor_ex(cmd, print_msg=False)
+            elif self._print_publish and self._print_pub_motor_all:
+                self._client.publish_motor_ex(cmd, print_msg=True)
             else:
                 self._client.publish_motor(cmd)
+
+            self._record_motor_pub(now)
         except Exception as e:
             self._append_log(f"motor publish failed: {e}")
+
+    def _record_motor_pub(self, now: float) -> None:
+        last = self._motor_last_pub_t
+        self._motor_last_pub_t = now
+        if last is None:
+            return
+
+        dt = now - last
+        if dt <= 0:
+            return
+
+        self._motor_dt_s.append(dt)
+        dt_ms = dt * 1000.0
+        avg = sum(self._motor_dt_s) / max(1, len(self._motor_dt_s))
+        avg_ms = avg * 1000.0
+        hz = 1.0 / avg if avg > 0 else 0.0
+        self._lbl_motor_period.setText(f"dt={dt_ms:5.1f}ms avg={avg_ms:5.1f}ms ({hz:4.1f}Hz)")
+
+        if self._print_motor_period and (now - self._motor_period_last_print_t >= 1.0):
+            self._motor_period_last_print_t = now
+            print(
+                f"[motor period] dt={dt_ms:.1f}ms avg={avg_ms:.1f}ms hz={hz:.2f} (n={len(self._motor_dt_s)})",
+                flush=True,
+            )
 
     def _send_stop(self, *, repeat: int) -> None:
         self._lbl_motor.setText("v_l=+0.000 v_r=+0.000")
@@ -853,7 +1029,12 @@ class MainWindow:
             )
             self._seq += 1
             try:
-                self._client.publish_motor(cmd)
+                now = time.monotonic()
+                if self._print_publish and self._print_pub_motor_all:
+                    self._client.publish_motor_ex(cmd, print_msg=True)
+                else:
+                    self._client.publish_motor(cmd)
+                self._record_motor_pub(now)
             except Exception as e:
                 self._append_log(f"stop publish failed: {e}")
                 break
@@ -1009,6 +1190,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Zenoh remote UI for dmc_robo")
     p.add_argument("--robot-id", required=True, help="robot_id (e.g. rasp-zero-01)")
     p.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Path to config.toml for UI defaults. If omitted, loads ./config.toml when it exists.",
+    )
+    p.add_argument(
+        "--no-config",
+        action="store_true",
+        help="Disable loading ./config.toml (even if it exists).",
+    )
+    p.add_argument(
         "--zenoh-config",
         type=Path,
         default=None,
@@ -1032,7 +1224,30 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Print published messages to terminal (rate-limited for motor).",
     )
+    p.add_argument(
+        "--print-pub-motor-all",
+        action="store_true",
+        help="Print ALL motor publishes to terminal (very verbose). Requires --print-pub.",
+    )
+    p.add_argument(
+        "--print-motor-period",
+        action="store_true",
+        help="Print measured motor publish period to terminal (about 1 line/sec).",
+    )
     args = p.parse_args(argv)
+    if args.print_pub_motor_all:
+        args.print_pub = True
+
+    config_path: Optional[Path]
+    if args.no_config:
+        config_path = None
+    elif args.config is not None:
+        config_path = args.config
+    else:
+        candidate = Path("config.toml")
+        config_path = candidate if candidate.exists() else None
+
+    ui_config = _load_ui_config(config_path)
 
     open_session = _build_session_opener(
         config_path=args.zenoh_config, mode=args.mode, connect_endpoints=list(args.connect)
@@ -1045,7 +1260,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     client = ZenohClient(
         open_session=open_session, robot_id=args.robot_id, bridge=bridge, print_publish=args.print_pub
     )
-    win = MainWindow(client=client, bridge=bridge, args=args)
+    win = MainWindow(client=client, bridge=bridge, args=args, ui_config=ui_config)
     app.installEventFilter(win._key_filter)  # global motor key capture
     win.show()
     return int(app.exec())

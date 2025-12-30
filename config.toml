@@ -1,0 +1,17 @@
+[motor]
+# UI default for "speed step (mps)"
+speed_step_mps = 0.50
+# UI default for "publish Hz" (motor/cmd publish rate while a key is held)
+publish_hz = 10.0
+# UI default for "deadman ms"
+deadman_ms = 200
+
+[lidar]
+# UI throttling rate for LiDAR redraw (not the robot publish rate)
+update_hz = 10.0
+# UI default for "max points"
+max_points = 5000
+# UI default for "range max (m) (<=1.0)"
+range_m = 1.0
+# UI default for "flip Y (front/back)"
+flip_y = false

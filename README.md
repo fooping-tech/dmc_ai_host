@@ -52,6 +52,14 @@ publish しているメッセージをターミナルに出したい場合:
 
     python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub
 
+モータ指令を「全て」確認したい場合（止まる瞬間の揺れ等の解析用）:
+
+    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub-motor-all
+
+モータの publish 周期（実測）を確認したい場合:
+
+    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-motor-period
+
 設定ファイルのテンプレート: `docs/zenoh_remote.json5.example`
 
 ## 操作（キーボード）
