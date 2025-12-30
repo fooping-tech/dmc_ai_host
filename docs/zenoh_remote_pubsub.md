@@ -17,6 +17,7 @@
 最小操作スクリプト:
 
 - `docs/remote_zenoh_tool.py`（このリポジトリに同梱）
+  - `motor/stop/oled/imu/camera/lidar` のサブコマンドを提供します
 
 ## ネットワーク構成（おすすめ）
 
@@ -73,10 +74,10 @@ payload（JSON）例:
 - `unit`: `"mps"`（本リポジトリの実装は unit は現状ログ用途で、速度解釈はドライバ依存です）
 - `deadman_ms`: 途絶時に停止するまでの猶予（ms）
 
-実行例（`robot_id=rasp-zero-01`）:
+	実行例（`robot_id=rasp-zero-01`）:
 
-    # (推奨) 付属の最小ツール
-    python3 docs/remote_zenoh_tool.py --robot-id rasp-zero-01 --zenoh-config ./zenoh_remote.json5 motor --v-l 0.10 --v-r 0.10 --duration-s 2
+	    # (推奨) 付属の最小ツール
+	    python3 docs/remote_zenoh_tool.py --robot-id rasp-zero-01 --zenoh-config ./zenoh_remote.json5 motor --v-l 1.0 --v-r 1.0 --duration-s 1
 
     python3 - <<'PY'
     import json, time
@@ -225,6 +226,26 @@ JPEG は bytes のまま届くので、ファイルに保存できます。
     sub_meta.undeclare()
     s.close()
     PY
+
+## 5) lidar を Subscribe（角度ごとの生値 / 正面サマリ）
+
+ロボットが publish しているキー:
+
+- scan（角度ごとの生値）: `dmc_robo/<robot_id>/lidar/scan`
+- front（正面サマリ）: `dmc_robo/<robot_id>/lidar/front`
+
+payload は環境依存になり得るため、まずは `docs/remote_zenoh_tool.py lidar --scan --print-json` で生JSONを確認してください。
+
+実行例:
+
+    # (デフォルト) lidar/front を subscribe して JSON を表示
+    python3 docs/remote_zenoh_tool.py --robot-id rasp-zero-01 --zenoh-config ./zenoh_remote.json5 lidar
+
+    # lidar/scan の JSON をそのまま表示（点群配列が大きいので注意）
+    python3 docs/remote_zenoh_tool.py --robot-id rasp-zero-01 --zenoh-config ./zenoh_remote.json5 lidar --scan --print-json
+
+    # lidar/scan を角度(deg)/距離(m)として表示（先頭 N 点のみ）
+    python3 docs/remote_zenoh_tool.py --robot-id rasp-zero-01 --zenoh-config ./zenoh_remote.json5 lidar --scan --print-points --max-points 200
 
 ## トラブルシュート
 

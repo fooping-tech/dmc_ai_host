@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+"""
+Remote Zenoh control/subscription tool for this repository.
+
+Usage and Zenoh connection configuration examples are documented in:
+  docs/zenoh_remote_pubsub.md
+"""
+
 import argparse
 import json
 import time
@@ -176,8 +183,82 @@ def cmd_camera(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lidar(args: argparse.Namespace) -> int:
+    key_scan = _key(args.robot_id, "lidar/scan")
+    key_front = _key(args.robot_id, "lidar/front")
+    session = args.open_session()
+
+    def on_front(sample: Any) -> None:
+        try:
+            print(json.dumps(_decode_json_payload(sample), ensure_ascii=False))
+        except Exception as e:
+            print(f"decode failed: {e}")
+
+    def on_scan(sample: Any) -> None:
+        try:
+            payload = _decode_json_payload(sample)
+        except Exception as e:
+            print(f"decode failed: {e}")
+            return
+
+        if args.print_json:
+            print(json.dumps(payload, ensure_ascii=False))
+            return
+
+        seq = payload.get("seq")
+        ts_ms = payload.get("ts_ms")
+        points = payload.get("points") or []
+        try:
+            n = len(points)
+        except Exception:
+            n = 0
+        print(f"scan: seq={seq} ts_ms={ts_ms} points={n}")
+
+        if not args.print_points:
+            return
+
+        import math
+
+        max_points = int(args.max_points)
+        for i, p in enumerate(points[:max_points]):
+            try:
+                angle_rad = float(p.get("angle_rad"))
+                range_m = float(p.get("range_m"))
+            except Exception:
+                continue
+            angle_deg = math.degrees(angle_rad)
+            intensity = p.get("intensity")
+            if intensity is None:
+                print(f"  {i:04d}: angle_deg={angle_deg:8.2f} range_m={range_m:6.3f}")
+            else:
+                try:
+                    inten = float(intensity)
+                except Exception:
+                    inten = intensity
+                print(f"  {i:04d}: angle_deg={angle_deg:8.2f} range_m={range_m:6.3f} intensity={inten}")
+
+    subs = []
+    try:
+        if args.scan:
+            subs.append(session.declare_subscriber(key_scan, on_scan))
+        if args.front:
+            subs.append(session.declare_subscriber(key_front, on_front))
+        input("subscribing lidar... press Enter to quit\n")
+    finally:
+        for sub in subs:
+            try:
+                sub.undeclare()
+            except Exception:
+                pass
+        session.close()
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Minimal remote Zenoh control tool for dmc_ai_mobility")
+    p.epilog = (
+        "Docs: docs/zenoh_remote_pubsub.md (how to configure --zenoh-config / --connect)."
+    )
     p.add_argument("--robot-id", required=True, help="robot_id (e.g. rasp-zero-01)")
     p.add_argument(
         "--zenoh-config",
@@ -228,7 +309,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     cam.add_argument("--print-meta", action="store_true")
     cam.set_defaults(func=cmd_camera)
 
+    lidar = sub.add_parser("lidar", help="Subscribe lidar scan/front and print")
+    lidar.add_argument("--scan", action="store_true", help="Subscribe lidar/scan (angle-wise raw values)")
+    lidar.add_argument("--front", action="store_true", help="Subscribe lidar/front (summary distance)")
+    lidar.add_argument("--print-json", action="store_true", help="Print scan payload as raw JSON")
+    lidar.add_argument("--print-points", action="store_true", help="Print per-point angle/range from scan payload")
+    lidar.add_argument("--max-points", type=int, default=100, help="Max points to print when --print-points")
+    lidar.set_defaults(func=cmd_lidar)
+
     args = p.parse_args(argv)
+    if args.cmd == "lidar" and not getattr(args, "scan", False) and not getattr(args, "front", False):
+        args.front = True
     args.open_session = _build_session_opener(
         config_path=args.zenoh_config, mode=args.mode, connect_endpoints=list(args.connect)
     )

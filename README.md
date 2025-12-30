@@ -11,6 +11,9 @@
 - キーボード操作で左右タイヤを個別に前後進（左: `r` 前進 / `f` 後進、右: `u` 前進 / `j` 後進）
 - IMU（ジャイロ）値をリアルタイムチャート表示（raw JSON 表示 + フィールドパス指定）
 - カメラJPEGの最新フレーム表示（meta表示つき）
+- LiDAR（`lidar/scan`）点群を2D表示（間引き・距離フィルタ）
+- 表示範囲は 2m x 2m（x/y がそれぞれ -1.0〜+1.0m）
+- 中心位置とフロント方向（+y）をアイコンで表示
 - OLED表示テキスト送信
 
 ## 前提
@@ -45,6 +48,10 @@ json5設定ファイルを使う例:
 
     python remote_zenoh_ui.py --robot-id <ROBOT_ID> --zenoh-config ./zenoh_remote.json5
 
+publish しているメッセージをターミナルに出したい場合:
+
+    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub
+
 設定ファイルのテンプレート: `docs/zenoh_remote.json5.example`
 
 ## 操作（キーボード）
@@ -53,6 +60,7 @@ json5設定ファイルを使う例:
 
 - 左タイヤ: `r` 前進 / `f` 後進
 - 右タイヤ: `u` 前進 / `j` 後進
+- カーソル: `↑` 前進 / `↓` 後退 / `←` 左回転 / `→` 右回転
 - `STOP (send zero)` ボタン: ゼロ指令を送信
 
 注意:

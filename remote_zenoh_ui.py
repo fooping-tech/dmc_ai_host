@@ -65,6 +65,8 @@ class _Bridge:
             imu = Signal(object)  # dict
             cam_jpeg = Signal(bytes)
             cam_meta = Signal(object)  # dict
+            lidar_scan = Signal(object)  # dict
+            lidar_front = Signal(object)  # dict
 
         self._b = _B()
 
@@ -101,10 +103,13 @@ class MotorCommand:
 
 
 class ZenohClient:
-    def __init__(self, *, open_session: Any, robot_id: str, bridge: _Bridge) -> None:
+    def __init__(
+        self, *, open_session: Any, robot_id: str, bridge: _Bridge, print_publish: bool
+    ) -> None:
         self._open_session = open_session
         self._robot_id = robot_id
         self._bridge = bridge
+        self._print_publish = bool(print_publish)
 
         self._session: Any = None
         self._pub_motor: Any = None
@@ -112,11 +117,18 @@ class ZenohClient:
         self._sub_imu: Any = None
         self._sub_cam_meta: Any = None
         self._sub_cam_jpeg: Any = None
+        self._sub_lidar_scan: Any = None
+        self._sub_lidar_front: Any = None
 
     def open(self) -> None:
         self._session = self._open_session()
-        self._pub_motor = self._session.declare_publisher(_key(self._robot_id, "motor/cmd"))
-        self._pub_oled = self._session.declare_publisher(_key(self._robot_id, "oled/cmd"))
+        key_motor = _key(self._robot_id, "motor/cmd")
+        key_oled = _key(self._robot_id, "oled/cmd")
+        self._pub_motor = self._session.declare_publisher(key_motor)
+        self._pub_oled = self._session.declare_publisher(key_oled)
+        if self._print_publish:
+            print(f"[pub] motor: {key_motor}", flush=True)
+            print(f"[pub] oled : {key_oled}", flush=True)
 
         def on_imu(sample: Any) -> None:
             try:
@@ -139,6 +151,20 @@ class ZenohClient:
             except Exception as e:
                 self._bridge.qobj.log.emit(f"camera jpeg receive failed: {e}")
 
+        def on_lidar_scan(sample: Any) -> None:
+            try:
+                payload = _decode_json_payload(sample)
+                self._bridge.qobj.lidar_scan.emit(payload)
+            except Exception as e:
+                self._bridge.qobj.log.emit(f"lidar/scan decode failed: {e}")
+
+        def on_lidar_front(sample: Any) -> None:
+            try:
+                payload = _decode_json_payload(sample)
+                self._bridge.qobj.lidar_front.emit(payload)
+            except Exception as e:
+                self._bridge.qobj.log.emit(f"lidar/front decode failed: {e}")
+
         self._sub_imu = self._session.declare_subscriber(_key(self._robot_id, "imu/state"), on_imu)
         self._sub_cam_meta = self._session.declare_subscriber(
             _key(self._robot_id, "camera/meta"), on_meta
@@ -146,10 +172,28 @@ class ZenohClient:
         self._sub_cam_jpeg = self._session.declare_subscriber(
             _key(self._robot_id, "camera/image/jpeg"), on_jpeg
         )
+        self._sub_lidar_scan = self._session.declare_subscriber(
+            _key(self._robot_id, "lidar/scan"), on_lidar_scan
+        )
+        self._sub_lidar_front = self._session.declare_subscriber(
+            _key(self._robot_id, "lidar/front"), on_lidar_front
+        )
 
         self._bridge.qobj.log.emit("zenoh connected")
 
     def close(self) -> None:
+        try:
+            if self._sub_lidar_front is not None:
+                self._sub_lidar_front.undeclare()
+        finally:
+            self._sub_lidar_front = None
+
+        try:
+            if self._sub_lidar_scan is not None:
+                self._sub_lidar_scan.undeclare()
+        finally:
+            self._sub_lidar_scan = None
+
         try:
             if self._sub_cam_jpeg is not None:
                 self._sub_cam_jpeg.undeclare()
@@ -177,15 +221,30 @@ class ZenohClient:
             self._pub_oled = None
 
     def publish_motor(self, cmd: MotorCommand) -> None:
+        self.publish_motor_ex(cmd, print_msg=None)
+
+    def publish_motor_ex(self, cmd: MotorCommand, *, print_msg: Optional[bool]) -> None:
         if self._pub_motor is None:
             return
         self._pub_motor.put(cmd.to_bytes())
+        do_print = self._print_publish if print_msg is None else bool(print_msg)
+        if do_print:
+            print(
+                f"[pub] motor seq={cmd.seq} v_l={cmd.v_l:+.3f} v_r={cmd.v_r:+.3f} deadman_ms={cmd.deadman_ms}",
+                flush=True,
+            )
 
     def publish_oled(self, text: str) -> None:
+        self.publish_oled_ex(text, print_msg=None)
+
+    def publish_oled_ex(self, text: str, *, print_msg: Optional[bool]) -> None:
         if self._pub_oled is None:
             return
         payload = {"text": str(text), "ts_ms": int(time.time() * 1000)}
         self._pub_oled.put(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        do_print = self._print_publish if print_msg is None else bool(print_msg)
+        if do_print:
+            print(f"[pub] oled {json.dumps(payload, ensure_ascii=False)}", flush=True)
 
 
 def _get_by_path(obj: Any, path: str) -> Any:
@@ -271,11 +330,59 @@ def _autodetect_vec3(payload: Any) -> tuple[Optional[str], Optional[tuple[float,
     return None, None
 
 
+def _extract_lidar_points(payload: Any) -> tuple[Optional[int], Optional[int], list[tuple[float, float, Optional[float]]]]:
+    seq = None
+    ts_ms = None
+    if isinstance(payload, dict):
+        try:
+            seq = payload.get("seq")
+        except Exception:
+            seq = None
+        try:
+            ts_ms = payload.get("ts_ms")
+        except Exception:
+            ts_ms = None
+
+    points_any = payload.get("points") if isinstance(payload, dict) else None
+    if not isinstance(points_any, list):
+        return None, None, []
+
+    out: list[tuple[float, float, Optional[float]]] = []
+    for p in points_any:
+        angle = None
+        rng = None
+        intensity: Optional[float] = None
+
+        if isinstance(p, dict):
+            angle = p.get("angle_rad")
+            rng = p.get("range_m")
+            intensity_any = p.get("intensity")
+            if isinstance(intensity_any, (int, float)):
+                intensity = float(intensity_any)
+        elif isinstance(p, (list, tuple)) and len(p) >= 2:
+            angle = p[0]
+            rng = p[1]
+            if len(p) >= 3 and isinstance(p[2], (int, float)):
+                intensity = float(p[2])
+
+        if not isinstance(angle, (int, float)) or not isinstance(rng, (int, float)):
+            continue
+        out.append((float(angle), float(rng), intensity))
+
+    return (
+        int(seq) if isinstance(seq, int) else None,
+        int(ts_ms) if isinstance(ts_ms, int) else None,
+        out,
+    )
+
+
 class MainWindow:
     def __init__(self, *, client: ZenohClient, bridge: _Bridge, args: argparse.Namespace) -> None:
         from PySide6.QtCore import QEvent, QObject, QTimer, Qt
         from PySide6.QtGui import QAction, QCloseEvent, QFont, QKeyEvent
         from PySide6.QtWidgets import (
+            QAbstractSpinBox,
+            QCheckBox,
             QDoubleSpinBox,
             QFormLayout,
             QFrame,
@@ -288,12 +395,14 @@ class MainWindow:
             QPlainTextEdit,
             QPushButton,
             QSpinBox,
+            QSizePolicy,
             QSplitter,
             QVBoxLayout,
             QWidget,
         )
 
         import pyqtgraph as pg
+        import numpy as np
 
         self._Qt = Qt
         self._QCloseEvent = QCloseEvent
@@ -301,6 +410,7 @@ class MainWindow:
         self._QObject = QObject
         self._QKeyEvent = QKeyEvent
         self._QMessageBox = QMessageBox
+        self._np = np
 
         self._client = client
         self._bridge = bridge
@@ -309,6 +419,10 @@ class MainWindow:
         self._seq = 0
         self._pressed: set[int] = set()
         self._last_nonzero = False
+        self._closing = False
+        self._print_publish = bool(getattr(args, "print_pub", False))
+        self._last_motor_print: Optional[tuple[float, float]] = None
+        self._last_motor_print_t = 0.0
 
         class _Win(QMainWindow):
             def __init__(self, owner: "MainWindow"):
@@ -324,8 +438,10 @@ class MainWindow:
         self._win.setMinimumSize(1100, 700)
 
         central = QWidget()
+        central.setFocusPolicy(Qt.StrongFocus)
         root = QHBoxLayout(central)
         self._win.setCentralWidget(central)
+        self._focus_sink = central
 
         # Left: controls + logs
         left = QWidget()
@@ -337,7 +453,7 @@ class MainWindow:
         self._lbl_status.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         conn_form.addRow("status", self._lbl_status)
         self._lbl_keys = QLabel(
-            "motor: left r/f, right u/j (release to stop)\n"
+            "motor: left r/f, right u/j, arrows (release to stop)\n"
             "note: key capture disabled while typing in text fields"
         )
         conn_form.addRow("keys", self._lbl_keys)
@@ -347,9 +463,9 @@ class MainWindow:
         motor_form = QFormLayout(motor_box)
         self._spin_step = QDoubleSpinBox()
         self._spin_step.setRange(0.0, 2.0)
-        self._spin_step.setSingleStep(0.01)
+        self._spin_step.setSingleStep(0.1)
         self._spin_step.setDecimals(3)
-        self._spin_step.setValue(0.10)
+        self._spin_step.setValue(0.50)
         motor_form.addRow("speed step (mps)", self._spin_step)
         self._spin_hz = QDoubleSpinBox()
         self._spin_hz.setRange(1.0, 60.0)
@@ -393,13 +509,36 @@ class MainWindow:
         imu_form.addRow("latest", self._lbl_gyro)
         left_layout.addWidget(imu_box)
 
+        lidar_box = QGroupBox("LiDAR")
+        lidar_form = QFormLayout(lidar_box)
+        self._spin_lidar_max_points = QSpinBox()
+        self._spin_lidar_max_points.setRange(100, 50000)
+        self._spin_lidar_max_points.setValue(5000)
+        lidar_form.addRow("max points", self._spin_lidar_max_points)
+        self._spin_lidar_range_m = QDoubleSpinBox()
+        self._spin_lidar_range_m.setRange(0.0, 1.0)
+        self._spin_lidar_range_m.setDecimals(2)
+        self._spin_lidar_range_m.setSingleStep(0.5)
+        self._spin_lidar_range_m.setValue(1.0)
+        lidar_form.addRow("range max (m) (<=1.0)", self._spin_lidar_range_m)
+        self._chk_lidar_flip_y = QCheckBox("flip Y (front/back)")
+        self._chk_lidar_flip_y.setChecked(False)
+        lidar_form.addRow(self._chk_lidar_flip_y)
+        self._lbl_lidar = QLabel("scan: --")
+        self._lbl_lidar.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        lidar_form.addRow("status", self._lbl_lidar)
+        self._lbl_lidar_front = QLabel("front: --")
+        self._lbl_lidar_front.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        lidar_form.addRow("front", self._lbl_lidar_front)
+        left_layout.addWidget(lidar_box)
+
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(2000)
         left_layout.addWidget(QLabel("Log"))
         left_layout.addWidget(self._log, 1)
 
-        # Right: camera + chart + raw json
+        # Right: camera + lidar + chart + raw json
         right_split = QSplitter()
         right_split.setOrientation(Qt.Vertical)
 
@@ -415,6 +554,48 @@ class MainWindow:
         cam_layout.addWidget(self._cam_label, 1)
         cam_layout.addWidget(self._lbl_cam_meta)
         right_split.addWidget(cam_panel)
+
+        lidar_panel = QWidget()
+        lidar_layout = QVBoxLayout(lidar_panel)
+        lidar_layout.setContentsMargins(0, 0, 0, 0)
+
+        class _SquarePlotWidget(pg.PlotWidget):
+            def resizeEvent(self, ev) -> None:  # type: ignore[override]
+                super().resizeEvent(ev)
+                w = max(200, int(self.width()))
+                self.setMinimumHeight(w)
+                self.setMaximumHeight(w)
+
+        self._lidar_plot = _SquarePlotWidget()
+        self._lidar_plot.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._lidar_plot.showGrid(x=True, y=True, alpha=0.25)
+        self._lidar_plot.setAspectLocked(True)
+        self._lidar_plot.setLabel("left", "y", units="m")
+        self._lidar_plot.setLabel("bottom", "x", units="m")
+        self._lidar_plot.enableAutoRange(False)
+        self._lidar_plot.setXRange(-1.0, 1.0, padding=0.0)
+        self._lidar_plot.setYRange(-1.0, 1.0, padding=0.0)
+        self._lidar_plot.setTitle("LiDAR (top view) 2m x 2m")
+
+        self._lidar_axis_x = pg.InfiniteLine(pos=0.0, angle=0, pen=pg.mkPen((150, 150, 150), style=Qt.DashLine))
+        self._lidar_axis_y = pg.InfiniteLine(pos=0.0, angle=90, pen=pg.mkPen((150, 150, 150), style=Qt.DashLine))
+        self._lidar_plot.addItem(self._lidar_axis_x)
+        self._lidar_plot.addItem(self._lidar_axis_y)
+
+        self._lidar_robot = pg.ScatterPlotItem(size=14, pen=pg.mkPen("c", width=2), brush=pg.mkBrush(0, 200, 200, 120))
+        self._lidar_robot.setData(pos=[(0.0, 0.0)])
+        self._lidar_plot.addItem(self._lidar_robot)
+
+        # Robot heading is +Y (up).
+        self._lidar_front_line = pg.PlotDataItem([0.0, 0.0], [0.0, 0.35], pen=pg.mkPen("c", width=3))
+        self._lidar_plot.addItem(self._lidar_front_line)
+        self._lidar_front_arrow = pg.ArrowItem(pos=(0.0, 0.35), angle=90, brush=pg.mkBrush("c"), pen=pg.mkPen("c"))
+        self._lidar_plot.addItem(self._lidar_front_arrow)
+
+        self._lidar_scatter = pg.ScatterPlotItem(size=2, pen=None, brush=pg.mkBrush(255, 255, 0, 200))
+        self._lidar_plot.addItem(self._lidar_scatter)
+        lidar_layout.addWidget(self._lidar_plot, 1)
+        right_split.addWidget(lidar_panel)
 
         imu_panel = QWidget()
         imu_layout = QVBoxLayout(imu_panel)
@@ -464,6 +645,8 @@ class MainWindow:
         bridge.qobj.imu.connect(self._on_imu)
         bridge.qobj.cam_jpeg.connect(self._on_cam_jpeg)
         bridge.qobj.cam_meta.connect(self._on_cam_meta)
+        bridge.qobj.lidar_scan.connect(self._on_lidar_scan)
+        bridge.qobj.lidar_front.connect(self._on_lidar_front)
 
         # Motor publish timer
         self._motor_timer = QTimer()
@@ -472,7 +655,7 @@ class MainWindow:
         self._spin_hz.valueChanged.connect(self._on_hz_changed)
 
         # Global key capture
-        self._typing_widgets = (QLineEdit, QPlainTextEdit)
+        self._typing_widgets = (QLineEdit, QPlainTextEdit, QAbstractSpinBox)
 
         class _KeyFilter(QObject):
             def __init__(self, owner: "MainWindow"):
@@ -483,6 +666,12 @@ class MainWindow:
                 return self._owner._event_filter(obj, event)
 
         self._key_filter = _KeyFilter(self)
+
+        # LiDAR update throttling
+        self._lidar_last_scan: Optional[dict[str, Any]] = None
+        self._lidar_timer = QTimer()
+        self._lidar_timer.timeout.connect(self._tick_lidar)
+        self._lidar_timer.start(100)  # 10 Hz
 
         # Open Zenoh now
         try:
@@ -515,6 +704,18 @@ class MainWindow:
             return False
 
         focused = QApplication.focusWidget()
+
+        # ESC clears focus so arrow keys won't modify focused input widgets (spinboxes, text fields).
+        # After clearing, focus goes to the main window so motor keys work immediately.
+        if event.type() == self._QEvent.KeyPress:
+            try:
+                if event.key() == self._Qt.Key_Escape and focused is not None:
+                    focused.clearFocus()
+                    self._focus_sink.setFocus()
+                    return True
+            except Exception:
+                pass
+
         if focused is not None:
             if isinstance(focused, QPlainTextEdit) and focused.isReadOnly():
                 pass
@@ -528,6 +729,10 @@ class MainWindow:
             self._Qt.Key_F,
             self._Qt.Key_U,
             self._Qt.Key_J,
+            self._Qt.Key_Up,
+            self._Qt.Key_Down,
+            self._Qt.Key_Left,
+            self._Qt.Key_Right,
         ):
             return False
 
@@ -551,6 +756,37 @@ class MainWindow:
     def _desired_motor(self) -> tuple[float, float]:
         step = float(self._spin_step.value())
 
+        # Arrow-key driving (combined command) takes priority over per-wheel keys.
+        up = self._Qt.Key_Up in self._pressed
+        right = self._Qt.Key_Right in self._pressed
+        left = self._Qt.Key_Left in self._pressed
+        down = self._Qt.Key_Down in self._pressed
+
+        # When moving forward, allow "add turn" by pressing left/right:
+        # - Up + Right => right wheel is 0.5x (gentle right)
+        # - Up + Left  => left wheel is 0.5x (gentle left)
+        if up and right and not left:
+            return step, step * 0.5
+        if up and left and not right:
+            return step * 0.5, step
+
+        # When moving backward, allow "add turn" by pressing left/right:
+        # - Down + Right => right wheel is 0.5x (gentle right while reversing)
+        # - Down + Left  => left wheel is 0.5x (gentle left while reversing)
+        if down and right and not left:
+            return -step, -step * 0.5
+        if down and left and not right:
+            return -step * 0.5, -step
+
+        if up:
+            return step, step
+        if down:
+            return -step, -step
+        if self._Qt.Key_Left in self._pressed:
+            return -step * 0.3, step * 0.3
+        if self._Qt.Key_Right in self._pressed:
+            return step * 0.3, -step * 0.3
+
         left = 0.0
         right = 0.0
 
@@ -567,6 +803,8 @@ class MainWindow:
         return left, right
 
     def _tick_motor(self) -> None:
+        if self._closing:
+            return
         v_l, v_r = self._desired_motor()
         nonzero = (abs(v_l) > 1e-9) or (abs(v_r) > 1e-9)
         if not nonzero:
@@ -587,7 +825,18 @@ class MainWindow:
         )
         self._seq += 1
         try:
-            self._client.publish_motor(cmd)
+            # Avoid flooding the terminal: print only on change or <=1 Hz.
+            if self._print_publish:
+                now = time.monotonic()
+                cur = (cmd.v_l, cmd.v_r)
+                if (cur != self._last_motor_print) or (now - self._last_motor_print_t >= 1.0):
+                    self._last_motor_print = cur
+                    self._last_motor_print_t = now
+                    self._client.publish_motor_ex(cmd, print_msg=True)
+                else:
+                    self._client.publish_motor_ex(cmd, print_msg=False)
+            else:
+                self._client.publish_motor(cmd)
         except Exception as e:
             self._append_log(f"motor publish failed: {e}")
 
@@ -671,9 +920,84 @@ class MainWindow:
         )
         self._cam_label.setPixmap(scaled)
 
-    def _on_close(self) -> None:
+    def _on_lidar_front(self, payload: Any) -> None:
         try:
-            self._send_stop(repeat=3)
+            self._lbl_lidar_front.setText("front: " + json.dumps(payload, ensure_ascii=False))
+        except Exception:
+            self._lbl_lidar_front.setText("front: (decode failed)")
+
+    def _on_lidar_scan(self, payload: Any) -> None:
+        if isinstance(payload, dict):
+            self._lidar_last_scan = payload
+        else:
+            self._lidar_last_scan = None
+
+    def _tick_lidar(self) -> None:
+        payload = self._lidar_last_scan
+        if not payload:
+            return
+
+        seq, ts_ms, pts = _extract_lidar_points(payload)
+        n_total = len(pts)
+        if n_total == 0:
+            self._lbl_lidar.setText(f"scan: seq={seq} ts_ms={ts_ms} points=0")
+            self._lidar_scatter.setData(pos=[])
+            return
+
+        max_points = int(self._spin_lidar_max_points.value())
+        rmax = min(1.0, float(self._spin_lidar_range_m.value()))
+
+        np = self._np
+        angles = np.fromiter((p[0] for p in pts), dtype=np.float64, count=n_total)
+        ranges = np.fromiter((p[1] for p in pts), dtype=np.float64, count=n_total)
+
+        mask = ranges > 0.0
+        if rmax > 0.0:
+            mask &= ranges <= rmax
+        angles = angles[mask]
+        ranges = ranges[mask]
+
+        n = int(angles.shape[0])
+        if n == 0:
+            self._lbl_lidar.setText(f"scan: seq={seq} ts_ms={ts_ms} points=0 (after filter)")
+            self._lidar_scatter.setData(pos=[])
+            return
+
+        if n > max_points:
+            idx = np.linspace(0, n - 1, num=max_points, dtype=np.int64)
+            angles = angles[idx]
+            ranges = ranges[idx]
+            n = int(angles.shape[0])
+
+        # Convert to XY where robot front is +Y (up) and angle_rad=0 points forward.
+        # x is right, y is forward.
+        x = ranges * np.sin(angles)
+        y = ranges * np.cos(angles)
+        if self._chk_lidar_flip_y.isChecked():
+            y = -y
+        pos = np.column_stack((x, y))
+        self._lidar_scatter.setData(pos=pos)
+
+        # Display area is fixed to 2m x 2m centered at origin.
+        # rmax is only used as a distance filter (and capped to <= 1.0 above).
+
+        self._lbl_lidar.setText(f"scan: seq={seq} ts_ms={ts_ms} points={n}/{n_total}")
+
+    def _on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+
+        try:
+            try:
+                self._pressed.clear()
+                self._last_nonzero = False
+                self._motor_timer.stop()
+            except Exception:
+                pass
+
+            # Send multiple zero commands to avoid a final non-zero tick racing the close.
+            self._send_stop(repeat=5)
         finally:
             try:
                 self._client.close()
@@ -703,6 +1027,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         help='Connect endpoint override (repeatable), e.g. --connect "tcp/192.168.1.10:7447". '
         "If set, it is applied on top of defaults or --zenoh-config.",
     )
+    p.add_argument(
+        "--print-pub",
+        action="store_true",
+        help="Print published messages to terminal (rate-limited for motor).",
+    )
     args = p.parse_args(argv)
 
     open_session = _build_session_opener(
@@ -713,7 +1042,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     app = QApplication(sys.argv[:1])
     bridge = _Bridge()
-    client = ZenohClient(open_session=open_session, robot_id=args.robot_id, bridge=bridge)
+    client = ZenohClient(
+        open_session=open_session, robot_id=args.robot_id, bridge=bridge, print_publish=args.print_pub
+    )
     win = MainWindow(client=client, bridge=bridge, args=args)
     app.installEventFilter(win._key_filter)  # global motor key capture
     win.show()

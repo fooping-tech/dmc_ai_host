@@ -7,14 +7,17 @@
 
 ## Purpose / Big Picture
 
-別PC（開発PC）から Zenoh を使ってロボットを遠隔操作できるデスクトップUIアプリを作ります。UIでできることは次の4つです。
+別PC（開発PC）から Zenoh を使ってロボットを遠隔操作できるデスクトップUIアプリを作ります。UIでできることは次の5つです。
 
 1) キーボードで左右タイヤを個別に前後進させる（左: `r` 前進、`f` 後進 / 右: `u` 前進、`j` 後進）。  
 2) ジャイロ（IMU）の値をリアルタイムにチャート表示する。  
 3) ロボットが送ってくる最新のカメラJPEGを画面に表示する。  
 4) OLEDに表示するテキストをUIから送って変更する。
+5) LiDAR の点群（スキャン）を2Dで可視化する（俯瞰プロット）。
 
 この変更の「動いた」が分かる状態は、アプリを起動して、キー入力で `dmc_robo/<robot_id>/motor/cmd` に publish が流れ、`dmc_robo/<robot_id>/imu/state` の値がグラフで動き、`dmc_robo/<robot_id>/camera/image/jpeg` が画面に出て、入力したテキストが `dmc_robo/<robot_id>/oled/cmd` に publish されることです。
+
+LiDAR 対応の「動いた」は、`dmc_robo/<robot_id>/lidar/scan` を subscribe して、点が動的にプロットされ、点数や `lidar/front` のサマリがUI上で確認できることです。
 
 
 ## Progress
@@ -26,6 +29,7 @@
 - [x] (2025-12-29) `camera/*` subscribe → JPEG表示を実装した（最新フレーム表示、meta表示）。
 - [x] (2025-12-29) OLED入力UI → `oled/cmd` publish を実装した。
 - [x] (2025-12-29) `requirements.txt` と `docs/remote_ui.md` を追加した。
+- [x] (2025-12-30) LiDAR（`lidar/scan` / `lidar/front`）を subscribe し、2D点群表示を追加した（`remote_zenoh_ui.py`）。
 - [ ] 受け入れ手順（手動テスト）を実行し、必要ならパラメータ調整する。
 
 
@@ -33,6 +37,8 @@
 
 - Observation: 現時点で `imu/state` のJSONスキーマ（ジャイロのキー名）がこのリポジトリ内に定義されていない。
   Evidence: `docs/remote_zenoh_tool.py` は JSON をそのままprintするだけでフィールド解釈が無い。
+- Observation: `docs/zenoh_remote_pubsub.md` が参照している `doc/keys_and_payloads.md` がこのリポジトリには存在しない。
+  Evidence: リポジトリ内に `doc/` ディレクトリが無い。
 
 
 ## Decision Log
@@ -44,6 +50,10 @@
 - Decision: 速度コマンドは「キー押下中だけ一定周期でpublish」し、キーが離れたらゼロ指令を送る（死活監視として `deadman_ms` を必ず付ける）。
   Rationale: UIの停止・通信断で走り続ける事故を避けるため（ロボット側が `deadman_ms` を尊重すると想定）。
   Date/Author: 2025-12-29 / Codex
+
+- Decision: LiDAR の可視化は 3D ではなく 2D（極座標→XY）で行う。
+  Rationale: `lidar/scan` が角度 + 距離の配列である前提だと 2D が最小で有用、かつ pyqtgraph で高速に描画できる。
+  Date/Author: 2025-12-30 / Codex
 
 
 ## Outcomes & Retrospective
@@ -74,6 +84,8 @@
 - OLED指令（publish）: `dmc_robo/<robot_id>/oled/cmd`
 - カメラJPEG（subscribe）: `dmc_robo/<robot_id>/camera/image/jpeg`
 - カメラmeta（subscribe）: `dmc_robo/<robot_id>/camera/meta`
+- LiDAR scan（subscribe）: `dmc_robo/<robot_id>/lidar/scan`
+- LiDAR front（subscribe）: `dmc_robo/<robot_id>/lidar/front`
 
 
 ## Plan of Work
@@ -85,6 +97,7 @@
 3) その後、IMUを subscribe してチャートに流します。IMUのJSONスキーマが不明なので、最初は「受信JSONを画面にも表示」し、既知候補（`gyro`, `gyr`, `angular_velocity` など）を試しつつ設定でフィールド名を切り替えられるようにします。スキーマが確定したらデフォルト設定を固定します。
 4) カメラJPEGを subscribe して、最新フレームをUI表示します。metaが来るなら seq/ts も画面に表示します（なくても動く）。
 5) OLEDはテキストボックス＋送信ボタンで `oled/cmd` を publish します。
+6) LiDAR は `lidar/scan` と `lidar/front` を subscribe し、`scan` の点群を 2D に可視化します。`front` は数値サマリ（例: 正面距離）として別表示します。
 
 成果物は次を想定します（最終決定は実装開始時に `Progress` で明記する）。
 
@@ -117,6 +130,17 @@
 
 期待する観察: 何らかのJSONが継続的に表示される（ロボットがIMUをpublishしている場合）。
 
+3.5) LiDAR の payload を確認する（点数・キー名をこの時点で把握し、UI実装の前提にする）。
+
+    # (デフォルト) lidar/front のJSONを表示
+    python docs/remote_zenoh_tool.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" lidar
+
+    # lidar/scan のJSONをそのまま表示（配列が大きい場合あり）
+    python docs/remote_zenoh_tool.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" lidar --scan --print-json
+
+    # lidar/scan を角度(deg)/距離(m)として表示（先頭N点）
+    python docs/remote_zenoh_tool.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" lidar --scan --print-points --max-points 200
+
 4) UIアプリを実装し、起動できることを確認する（このExecPlanの後続マイルストーン）。
 
     python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447"
@@ -131,6 +155,7 @@
 3) IMU: `imu/state` を受信するとグラフが更新され、最新値（数値）がUI上で確認できる。スキーマ不一致の場合でも生JSONを確認でき、アプリがクラッシュしない。
 4) カメラ: `camera/image/jpeg` を受信すると画像が表示・更新される。デコードできない場合はエラーをUIに表示しつつ継続する。
 5) OLED: 入力したテキストが `oled/cmd` に送信される（確認方法はロボット側の表示、または別subscriberでpayloadを確認）。
+6) LiDAR: `lidar/scan` を受信すると散布図が更新される。点数が多い場合でもUIが固まらず、必要に応じて間引き（max points / decimation）で描画する。`lidar/front` のサマリ値がUI上で確認できる。
 
 安全条件（必須）:
 
@@ -186,6 +211,14 @@ subscribeするpayload:
 - imu/state: UTF-8 JSON（スキーマは現場データから確定し、確定後にこのExecPlanへ追記する）
 - camera/image/jpeg: JPEG bytes
 - camera/meta: UTF-8 JSON（例: `seq` を含む可能性がある）
+- lidar/scan: UTF-8 JSON（以下の最小想定は `docs/remote_zenoh_tool.py` 実装に基づく）
+  - `seq` (int|null)
+  - `ts_ms` (int|null)
+  - `points` (list[object]): 各点が少なくとも `angle_rad` と `range_m` を含む想定
+    - `angle_rad` (float): 角度 [rad]
+    - `range_m` (float): 距離 [m]
+    - `intensity` (float|int|null): 任意
+- lidar/front: UTF-8 JSON（スキーマ未確定。現場データから確定し、このExecPlanへ追記する）
 
 ### UI I/F（操作）
 
@@ -201,6 +234,10 @@ subscribeするpayload:
 - `pyqtgraph`（高速チャート）
 - `numpy`（チャート用リングバッファ等に利用）
 - `pillow`（必要ならJPEGデコード補助。Qtの `QImage.fromData` だけで十分なら省略可）
+
+LiDAR 可視化で追加が必要になる可能性:
+
+- `numpy` は既に入っているので、極座標→XY変換・間引き・色付けに使う（追加依存なしで実現する）。
 
 
 ---
