@@ -425,7 +425,7 @@ def _extract_vec3(payload: Any, path: str) -> Optional[tuple[float, float, float
         return None
 
     if isinstance(candidate, dict):
-        for keys in (("x", "y", "z"), ("gx", "gy", "gz"), ("wx", "wy", "wz")):
+        for keys in (("x", "y", "z"), ("gx", "gy", "gz"), ("wx", "wy", "wz"), ("ax", "ay", "az")):
             x, y, z = candidate.get(keys[0]), candidate.get(keys[1]), candidate.get(keys[2])
             if all(isinstance(v, (int, float)) for v in (x, y, z)):
                 return float(x), float(y), float(z)
@@ -440,10 +440,48 @@ def _extract_vec3(payload: Any, path: str) -> Optional[tuple[float, float, float
     return None
 
 
-def _autodetect_vec3(payload: Any) -> tuple[Optional[str], Optional[tuple[float, float, float]]]:
-    candidates = ("gyro", "gyr", "angular_velocity", "angularVelocity")
+_VEC3_KEYSETS_GYRO: tuple[tuple[str, str, str], ...] = (
+    ("gx", "gy", "gz"),
+    ("wx", "wy", "wz"),
+    ("x", "y", "z"),
+)
+_VEC3_KEYSETS_ACCEL: tuple[tuple[str, str, str], ...] = (
+    ("ax", "ay", "az"),
+    ("x", "y", "z"),
+)
+
+
+def _extract_vec3_with_keysets(
+    payload: Any, path: str, *, keysets: tuple[tuple[str, str, str], ...]
+) -> Optional[tuple[float, float, float]]:
+    candidate = _get_by_path(payload, path)
+    if candidate is None:
+        return None
+
+    if isinstance(candidate, dict):
+        for keys in keysets:
+            x, y, z = candidate.get(keys[0]), candidate.get(keys[1]), candidate.get(keys[2])
+            if all(isinstance(v, (int, float)) for v in (x, y, z)):
+                return float(x), float(y), float(z)
+        return None
+
+    if isinstance(candidate, (list, tuple)) and len(candidate) >= 3:
+        x, y, z = candidate[0], candidate[1], candidate[2]
+        if all(isinstance(v, (int, float)) for v in (x, y, z)):
+            return float(x), float(y), float(z)
+        return None
+
+    return None
+
+
+def _autodetect_vec3(
+    payload: Any,
+    *,
+    candidates: tuple[str, ...],
+    keysets: tuple[tuple[str, str, str], ...],
+) -> tuple[Optional[str], Optional[tuple[float, float, float]]]:
     for path in candidates:
-        vec = _extract_vec3(payload, path)
+        vec = _extract_vec3_with_keysets(payload, path, keysets=keysets)
         if vec is not None:
             return path, vec
 
@@ -466,9 +504,9 @@ def _autodetect_vec3(payload: Any) -> tuple[Optional[str], Optional[tuple[float,
         seen.add(obj_id)
 
         if isinstance(obj, dict):
-            vec = _extract_vec3(obj, "")  # type: ignore[arg-type]
+            vec = _extract_vec3_with_keysets(obj, "", keysets=keysets)  # type: ignore[arg-type]
         elif isinstance(obj, (list, tuple)):
-            vec = _extract_vec3({"v": obj}, "v")
+            vec = _extract_vec3_with_keysets({"v": obj}, "v", keysets=keysets)
         else:
             vec = None
         if vec is not None:
@@ -540,6 +578,7 @@ class MainWindow:
         from PySide6.QtWidgets import (
             QAbstractSpinBox,
             QCheckBox,
+            QComboBox,
             QDoubleSpinBox,
             QFormLayout,
             QFrame,
@@ -667,18 +706,34 @@ class MainWindow:
         oled_form.addRow("text", row)
         left_layout.addWidget(oled_box)
 
-        imu_box = QGroupBox("IMU (gyro)")
+        imu_box = QGroupBox("IMU")
         imu_form = QFormLayout(imu_box)
+
+        self._combo_imu_plot = QComboBox()
+        self._combo_imu_plot.addItems(["gyro", "accel"])
+        imu_form.addRow("plot", self._combo_imu_plot)
+
         self._combo_gyro_path = QLineEdit()
         self._combo_gyro_path.setPlaceholderText("auto (examples: gyro, angular_velocity)")
-        imu_form.addRow("field path", self._combo_gyro_path)
+        imu_form.addRow("gyro field path", self._combo_gyro_path)
         self._lbl_gyro_path = QLabel("auto: (not detected yet)")
         self._lbl_gyro_path.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        imu_form.addRow("auto detect", self._lbl_gyro_path)
+        imu_form.addRow("gyro auto detect", self._lbl_gyro_path)
         self._lbl_gyro = QLabel("x=-- y=-- z=--")
         self._lbl_gyro.setFont(QFont("Monospace"))
         self._lbl_gyro.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        imu_form.addRow("latest", self._lbl_gyro)
+        imu_form.addRow("gyro latest", self._lbl_gyro)
+
+        self._combo_accel_path = QLineEdit()
+        self._combo_accel_path.setPlaceholderText("auto (examples: accel, linear_acceleration)")
+        imu_form.addRow("accel field path", self._combo_accel_path)
+        self._lbl_accel_path = QLabel("auto: (not detected yet)")
+        self._lbl_accel_path.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        imu_form.addRow("accel auto detect", self._lbl_accel_path)
+        self._lbl_accel = QLabel("x=-- y=-- z=--")
+        self._lbl_accel.setFont(QFont("Monospace"))
+        self._lbl_accel.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        imu_form.addRow("accel latest", self._lbl_accel)
         left_layout.addWidget(imu_box)
 
         lidar_box = QGroupBox("LiDAR")
@@ -812,6 +867,7 @@ class MainWindow:
         # Wiring
         self._btn_oled.clicked.connect(self._on_send_oled)
         self._btn_stop.clicked.connect(lambda: self._send_stop(repeat=3))
+        self._combo_imu_plot.currentTextChanged.connect(self._on_imu_plot_changed)
 
         bridge.qobj.log.connect(self._append_log)
         bridge.qobj.imu.connect(self._on_imu)
@@ -930,6 +986,24 @@ class MainWindow:
         except Exception:
             interval_ms = 50
         self._motor_timer.setInterval(max(10, interval_ms))
+
+    def _on_imu_plot_changed(self, text: str) -> None:
+        label = "accel" if str(text).lower() == "accel" else "gyro"
+        try:
+            self._plot.setLabel("left", label)
+        except Exception:
+            pass
+
+        try:
+            self._buf_t.clear()
+            self._buf_x.clear()
+            self._buf_y.clear()
+            self._buf_z.clear()
+            self._curve_x.setData([], [])
+            self._curve_y.setData([], [])
+            self._curve_z.setData([], [])
+        except Exception:
+            pass
 
     def _desired_motor(self) -> tuple[float, float]:
         step = float(self._spin_step.value())
@@ -1161,23 +1235,47 @@ class MainWindow:
         except Exception:
             self._raw.setPlainText(str(payload))
 
-        path = self._combo_gyro_path.text().strip()
-        vec = None
-        if path:
-            vec = _extract_vec3(payload, path)
-        else:
-            detected_path, vec = _autodetect_vec3(payload)
-            if detected_path:
-                self._lbl_gyro_path.setText(f"auto: {detected_path}")
-            else:
-                self._lbl_gyro_path.setText("auto: (not found)")
+        gyro_candidates = ("gyro", "gyr", "angular_velocity", "angularVelocity")
+        accel_candidates = ("accel", "acc", "acceleration", "linear_acceleration", "linearAcceleration")
 
+        gyro_path = self._combo_gyro_path.text().strip()
+        gyro_vec: Optional[tuple[float, float, float]]
+        if gyro_path:
+            gyro_vec = _extract_vec3_with_keysets(payload, gyro_path, keysets=_VEC3_KEYSETS_GYRO)
+        else:
+            detected_path, gyro_vec = _autodetect_vec3(
+                payload, candidates=gyro_candidates, keysets=_VEC3_KEYSETS_GYRO
+            )
+            self._lbl_gyro_path.setText(f"auto: {detected_path}" if detected_path else "auto: (not found)")
+
+        if gyro_vec is None:
+            self._lbl_gyro.setText("x=-- y=-- z=--")
+        else:
+            gx, gy, gz = gyro_vec
+            self._lbl_gyro.setText(f"x={gx:+.4f} y={gy:+.4f} z={gz:+.4f}")
+
+        accel_path = self._combo_accel_path.text().strip()
+        accel_vec: Optional[tuple[float, float, float]]
+        if accel_path:
+            accel_vec = _extract_vec3_with_keysets(payload, accel_path, keysets=_VEC3_KEYSETS_ACCEL)
+        else:
+            detected_path, accel_vec = _autodetect_vec3(
+                payload, candidates=accel_candidates, keysets=_VEC3_KEYSETS_ACCEL
+            )
+            self._lbl_accel_path.setText(f"auto: {detected_path}" if detected_path else "auto: (not found)")
+
+        if accel_vec is None:
+            self._lbl_accel.setText("x=-- y=-- z=--")
+        else:
+            ax, ay, az = accel_vec
+            self._lbl_accel.setText(f"x={ax:+.4f} y={ay:+.4f} z={az:+.4f}")
+
+        plot_mode = str(self._combo_imu_plot.currentText()).lower()
+        vec = accel_vec if plot_mode == "accel" else gyro_vec
         if vec is None:
-            self._lbl_gyro.setText("x=-- y=-- z=-- (set field path)")
             return
 
         x, y, z = vec
-        self._lbl_gyro.setText(f"x={x:+.4f} y={y:+.4f} z={z:+.4f}")
         t = time.monotonic() - self._t0
         self._buf_t.append(t)
         self._buf_x.append(x)
