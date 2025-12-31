@@ -197,6 +197,7 @@ class _Bridge:
         class _B(QObject):
             log = Signal(str)
             imu = Signal(object)  # dict
+            motor_telemetry = Signal(object)  # dict
             cam_jpeg = Signal(bytes)
             cam_meta = Signal(object)  # dict
             lidar_scan = Signal(object)  # dict
@@ -249,6 +250,7 @@ class ZenohClient:
         self._session: Any = None
         self._pub_motor: Any = None
         self._pub_oled: Any = None
+        self._sub_motor_telemetry: Any = None
         self._sub_imu: Any = None
         self._sub_cam_meta: Any = None
         self._sub_cam_jpeg: Any = None
@@ -273,6 +275,13 @@ class ZenohClient:
                 self._bridge.qobj.imu.emit(payload)
             except Exception as e:
                 self._bridge.qobj.log.emit(f"imu decode failed: {e}")
+
+        def on_motor_telemetry(sample: Any) -> None:
+            try:
+                payload = _decode_json_payload(sample)
+                self._bridge.qobj.motor_telemetry.emit(payload)
+            except Exception as e:
+                self._bridge.qobj.log.emit(f"motor/telemetry decode failed: {e}")
 
         def on_meta(sample: Any) -> None:
             try:
@@ -302,6 +311,9 @@ class ZenohClient:
             except Exception as e:
                 self._bridge.qobj.log.emit(f"lidar/front decode failed: {e}")
 
+        self._sub_motor_telemetry = self._session.declare_subscriber(
+            _key(self._robot_id, "motor/telemetry"), on_motor_telemetry
+        )
         self._sub_imu = self._session.declare_subscriber(_key(self._robot_id, "imu/state"), on_imu)
         self._sub_cam_meta = self._session.declare_subscriber(
             _key(self._robot_id, "camera/meta"), on_meta
@@ -348,6 +360,12 @@ class ZenohClient:
                 self._sub_imu.undeclare()
         finally:
             self._sub_imu = None
+
+        try:
+            if self._sub_motor_telemetry is not None:
+                self._sub_motor_telemetry.undeclare()
+        finally:
+            self._sub_motor_telemetry = None
 
         try:
             if self._session is not None:
@@ -629,6 +647,12 @@ class MainWindow:
         self._lbl_motor_period = QLabel("dt=-- avg=--")
         self._lbl_motor_period.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         motor_form.addRow("pub period", self._lbl_motor_period)
+        self._lbl_motor_telem_pw = QLabel("pw_l=-- pw_r=-- (raw --/--)")
+        self._lbl_motor_telem_pw.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        motor_form.addRow("telemetry pw", self._lbl_motor_telem_pw)
+        self._lbl_motor_telem_cmd = QLabel("cmd_v_l=-- cmd_v_r=-- seq=-- ts_ms=--")
+        self._lbl_motor_telem_cmd.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        motor_form.addRow("telemetry cmd", self._lbl_motor_telem_cmd)
         left_layout.addWidget(motor_box)
 
         oled_box = QGroupBox("OLED")
@@ -791,6 +815,7 @@ class MainWindow:
 
         bridge.qobj.log.connect(self._append_log)
         bridge.qobj.imu.connect(self._on_imu)
+        bridge.qobj.motor_telemetry.connect(self._on_motor_telemetry)
         bridge.qobj.cam_jpeg.connect(self._on_cam_jpeg)
         bridge.qobj.cam_meta.connect(self._on_cam_meta)
         bridge.qobj.lidar_scan.connect(self._on_lidar_scan)
@@ -1049,6 +1074,57 @@ class MainWindow:
             self._append_log(f"oled sent: {text!r}")
         except Exception as e:
             self._append_log(f"oled publish failed: {e}")
+
+    def _on_motor_telemetry(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            self._lbl_motor_telem_pw.setText("pw_l=-- pw_r=-- (raw --/--)")
+            self._lbl_motor_telem_cmd.setText("cmd_v_l=-- cmd_v_r=-- seq=-- ts_ms=--")
+            return
+
+        pw_l = payload.get("pw_l")
+        pw_r = payload.get("pw_r")
+        pw_l_raw = payload.get("pw_l_raw")
+        pw_r_raw = payload.get("pw_r_raw")
+
+        def _i(v: Any) -> Optional[int]:
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, int):
+                return int(v)
+            return None
+
+        def _f(v: Any) -> Optional[float]:
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, (int, float)):
+                return float(v)
+            return None
+
+        pw_l_i = _i(pw_l)
+        pw_r_i = _i(pw_r)
+        pw_l_raw_i = _i(pw_l_raw)
+        pw_r_raw_i = _i(pw_r_raw)
+
+        pw_l_s = "--" if pw_l_i is None else str(pw_l_i)
+        pw_r_s = "--" if pw_r_i is None else str(pw_r_i)
+        pw_l_raw_s = "--" if pw_l_raw_i is None else str(pw_l_raw_i)
+        pw_r_raw_s = "--" if pw_r_raw_i is None else str(pw_r_raw_i)
+        self._lbl_motor_telem_pw.setText(f"pw_l={pw_l_s} pw_r={pw_r_s} (raw {pw_l_raw_s}/{pw_r_raw_s})")
+
+        cmd_v_l = _f(payload.get("cmd_v_l"))
+        cmd_v_r = _f(payload.get("cmd_v_r"))
+        cmd_seq = _i(payload.get("cmd_seq"))
+        cmd_ts_ms = _i(payload.get("cmd_ts_ms"))
+        if cmd_ts_ms is None:
+            cmd_ts_ms = _i(payload.get("ts_ms"))
+
+        cmd_v_l_s = "--" if cmd_v_l is None else f"{cmd_v_l:+.3f}"
+        cmd_v_r_s = "--" if cmd_v_r is None else f"{cmd_v_r:+.3f}"
+        cmd_seq_s = "--" if cmd_seq is None else str(cmd_seq)
+        cmd_ts_s = "--" if cmd_ts_ms is None else str(cmd_ts_ms)
+        self._lbl_motor_telem_cmd.setText(
+            f"cmd_v_l={cmd_v_l_s} cmd_v_r={cmd_v_r_s} seq={cmd_seq_s} ts_ms={cmd_ts_s}"
+        )
 
     def _on_imu(self, payload: Any) -> None:
         try:
