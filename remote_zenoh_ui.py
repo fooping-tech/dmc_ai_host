@@ -616,7 +616,7 @@ class MainWindow:
         self._lbl_status.setFrameStyle(QFrame.Panel | QFrame.Sunken)
         conn_form.addRow("status", self._lbl_status)
         self._lbl_keys = QLabel(
-            "motor: left r/f, right u/j, arrows (release to stop)\n"
+            "motor: w/s(x)/a/d + q/e/z/c, per-wheel r/f u/j (release to stop)\n"
             "note: key capture disabled while typing in text fields"
         )
         conn_form.addRow("keys", self._lbl_keys)
@@ -878,7 +878,7 @@ class MainWindow:
 
         focused = QApplication.focusWidget()
 
-        # ESC clears focus so arrow keys won't modify focused input widgets (spinboxes, text fields).
+        # ESC clears focus so motor keys won't modify focused input widgets (spinboxes, text fields).
         # After clearing, focus goes to the main window so motor keys work immediately.
         if event.type() == self._QEvent.KeyPress:
             try:
@@ -902,10 +902,15 @@ class MainWindow:
             self._Qt.Key_F,
             self._Qt.Key_U,
             self._Qt.Key_J,
-            self._Qt.Key_Up,
-            self._Qt.Key_Down,
-            self._Qt.Key_Left,
-            self._Qt.Key_Right,
+            self._Qt.Key_W,
+            self._Qt.Key_A,
+            self._Qt.Key_S,
+            self._Qt.Key_X,
+            self._Qt.Key_D,
+            self._Qt.Key_Q,
+            self._Qt.Key_E,
+            self._Qt.Key_Z,
+            self._Qt.Key_C,
         ):
             return False
 
@@ -929,36 +934,60 @@ class MainWindow:
     def _desired_motor(self) -> tuple[float, float]:
         step = float(self._spin_step.value())
 
-        # Arrow-key driving (combined command) takes priority over per-wheel keys.
-        up = self._Qt.Key_Up in self._pressed
-        right = self._Qt.Key_Right in self._pressed
-        left = self._Qt.Key_Left in self._pressed
-        down = self._Qt.Key_Down in self._pressed
+        # WASD driving (combined command) takes priority over per-wheel keys.
+        # - W: forward
+        # - S/X: backward
+        # - A/D: rotate left/right (0.3x)
+        # - Q/E/Z/C: diagonal shortcut (W+A / W+D / S+A / S+D), with inside wheel 0.5x
+        composite_keys = (
+            self._Qt.Key_W,
+            self._Qt.Key_A,
+            self._Qt.Key_S,
+            self._Qt.Key_X,
+            self._Qt.Key_D,
+            self._Qt.Key_Q,
+            self._Qt.Key_E,
+            self._Qt.Key_Z,
+            self._Qt.Key_C,
+        )
+        if any(k in self._pressed for k in composite_keys):
+            forward = self._Qt.Key_W in self._pressed
+            backward = (self._Qt.Key_S in self._pressed) or (self._Qt.Key_X in self._pressed)
+            turn_left = self._Qt.Key_A in self._pressed
+            turn_right = self._Qt.Key_D in self._pressed
 
-        # When moving forward, allow "add turn" by pressing left/right:
-        # - Up + Right => right wheel is 0.5x (gentle right)
-        # - Up + Left  => left wheel is 0.5x (gentle left)
-        if up and right and not left:
-            return step, step * 0.5
-        if up and left and not right:
-            return step * 0.5, step
+            if self._Qt.Key_Q in self._pressed:
+                forward = True
+                turn_left = True
+            if self._Qt.Key_E in self._pressed:
+                forward = True
+                turn_right = True
+            if self._Qt.Key_Z in self._pressed:
+                backward = True
+                turn_left = True
+            if self._Qt.Key_C in self._pressed:
+                backward = True
+                turn_right = True
 
-        # When moving backward, allow "add turn" by pressing left/right:
-        # - Down + Right => right wheel is 0.5x (gentle right while reversing)
-        # - Down + Left  => left wheel is 0.5x (gentle left while reversing)
-        if down and right and not left:
-            return -step, -step * 0.5
-        if down and left and not right:
-            return -step * 0.5, -step
+            if forward and not backward:
+                if turn_left and not turn_right:
+                    return step * 0.5, step
+                if turn_right and not turn_left:
+                    return step, step * 0.5
+                return step, step
 
-        if up:
-            return step, step
-        if down:
-            return -step, -step
-        if self._Qt.Key_Left in self._pressed:
-            return -step * 0.3, step * 0.3
-        if self._Qt.Key_Right in self._pressed:
-            return step * 0.3, -step * 0.3
+            if backward and not forward:
+                if turn_left and not turn_right:
+                    return -step * 0.5, -step
+                if turn_right and not turn_left:
+                    return -step, -step * 0.5
+                return -step, -step
+
+            if turn_left and not turn_right:
+                return -step * 0.3, step * 0.3
+            if turn_right and not turn_left:
+                return step * 0.3, -step * 0.3
+            return 0.0, 0.0
 
         left = 0.0
         right = 0.0

@@ -1,6 +1,6 @@
 # Zenoh Remote UI（操作UIアプリ）
 
-このリポジトリの `remote_zenoh_ui.py` は、Zenoh pub/sub 経由でロボットを操作し、IMU（ジャイロ）とカメラを表示し、OLED表示文字列を送るデスクトップUIです。
+このリポジトリの `packages/lerobot_teleoperator_dmc_robo/lerobot_teleoperator_dmc_robo/remote_zenoh_ui.py` は、Zenoh pub/sub 経由でロボットを操作し、IMU（ジャイロ）とカメラを表示し、OLED表示文字列を送るデスクトップUIです。
 
 前提となる Zenoh キーやネットワーク構成の説明は `docs/zenoh_remote_pubsub.md` を参照してください。
 
@@ -21,11 +21,11 @@
 
 routerへ接続する例（推奨）:
 
-    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447"
+    python packages/lerobot_teleoperator_dmc_robo/lerobot_teleoperator_dmc_robo/remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447"
 
 json5設定ファイルを使う例:
 
-    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --zenoh-config ./zenoh_remote.json5
+    python packages/lerobot_teleoperator_dmc_robo/lerobot_teleoperator_dmc_robo/remote_zenoh_ui.py --robot-id <ROBOT_ID> --zenoh-config ./zenoh_remote.json5
 
 ## config.toml（UIのデフォルト設定）
 
@@ -37,31 +37,37 @@ json5設定ファイルを使う例:
 
 publish しているメッセージをターミナルに出したい場合:
 
-    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub
+    python packages/lerobot_teleoperator_dmc_robo/lerobot_teleoperator_dmc_robo/remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub
 
 モータ指令を「全て」確認したい場合（止まる瞬間の揺れ等の解析用、かなり大量に出ます）:
 
-    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub-motor-all
+    python packages/lerobot_teleoperator_dmc_robo/lerobot_teleoperator_dmc_robo/remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-pub-motor-all
 
 モータの publish 周期（実測）を確認したい場合:
 
-    python remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-motor-period
+    python packages/lerobot_teleoperator_dmc_robo/lerobot_teleoperator_dmc_robo/remote_zenoh_ui.py --robot-id <ROBOT_ID> --connect "tcp/<ROUTER_IP>:7447" --print-motor-period
 
 ## 操作（キーボード）
 
-左右タイヤを独立制御します（キー押下中だけ一定周期で publish し、離すと停止指令を送ります）。
+WASD 系の合成操作が優先です（キー押下中だけ一定周期で publish し、離すと停止指令を送ります）。
+
+- `w`: 前進
+- `s` / `x`: 後進
+- `a`: 左回転(0.3倍)
+- `d`: 右回転(0.3倍)
+- `q`: `w` + `a` 相当（左前、左タイヤは0.5倍）
+- `e`: `w` + `d` 相当（右前、右タイヤは0.5倍）
+- `z`: `s` + `a` 相当（左後、左タイヤは0.5倍）
+- `c`: `s` + `d` 相当（右後、右タイヤは0.5倍）
+
+左右タイヤの独立操作も使えます（WASD操作より優先度は低いです）。
 
 - 左タイヤ: `r` 前進 / `f` 後進
 - 右タイヤ: `u` 前進 / `j` 後進
-- カーソル: `↑` 前進 / `↓` 後退 / `←` 左回転(0.3倍) / `→` 右回転(0.3倍)（カーソルは左右合成コマンドとして動き、`r/f/u/j` より優先）
-  - `↑` を押しながら `→` を押す: 右タイヤは左タイヤの0.5倍で前進（ゆるく右）
-  - `↑` を押しながら `←` を押す: 左タイヤは右タイヤの0.5倍で前進（ゆるく左）
-  - `↓` を押しながら `→` を押す: 右タイヤは左タイヤの0.5倍で後退（ゆるく右）
-  - `↓` を押しながら `←` を押す: 左タイヤは右タイヤの0.5倍で後退（ゆるく左）
 
 注意:
 
-- 入力欄（数値欄やテキスト欄）にフォーカスがあると、カーソルキー等で値が変わることがあります。`Esc` を押すとフォーカスを外してモータ操作に戻せます。
+- 入力欄（数値欄やテキスト欄）にフォーカスがあると、キー入力で値が変わることがあります。`Esc` を押すとフォーカスを外してモータ操作に戻せます。
 - テキスト入力欄（OLEDやIMU rawなど）にフォーカスがある間は、誤操作防止のためモータキーを拾いません。
 - `STOP` ボタンでもゼロ指令を送れます。
 - `duration` 指定で一定時間だけ動かしたい場合は `docs/remote_zenoh_tool.py motor --duration-s ...` を使ってください（UIは押している間だけ動かす設計です）。
@@ -81,10 +87,6 @@ raw JSON を見て、`gyro.x` のように `.` 区切りで辿れるパスを指
 
 - `camera/image/jpeg` を受信すると最新フレームを画面に表示します。
 - `camera/meta` が届く場合、meta JSON を表示します。
-
-## モータテレメトリ表示
-
-- `motor/telemetry` をサブスクライブして、パルス幅（`pw_*`）と直近コマンド（`cmd_*`）の要約を `Motor` パネルに表示します。
 
 ## LiDAR（点群/スキャン）表示
 
