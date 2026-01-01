@@ -6,6 +6,20 @@ publish_hz = 10.0
 # UI default for "deadman ms"
 deadman_ms = 200
 
+[controller]
+# Serial device path (example: /dev/tty.usbmodemXXXX, /dev/ttyACM0, COM3)
+serial = "/dev/tty.usbmodem11401"
+# Baud rate (USB CDC ignores but host needs it)
+baud = 115200
+# Raw max magnitude for scaling (supports L/R button doubling)
+raw_max = 2000
+# Max speed (mps) when raw_max is reached
+max_mps = 0.5
+# Publish rate (Hz) for motor/cmd
+publish_hz = 10.0
+# Deadman override for serial bridge (defaults to [motor].deadman_ms if omitted)
+deadman_ms = 200
+
 [lidar]
 # UI throttling rate for LiDAR redraw (not the robot publish rate)
 update_hz = 10.0

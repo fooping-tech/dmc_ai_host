@@ -245,3 +245,96 @@ LiDAR 可視化で追加が必要になる可能性:
 変更メモ（このファイル自体の改訂理由）:
 
 - 2025-12-29: ユーザー要件（Zenoh pub/sub の遠隔操作UI）に合わせ、既存の汎用テンプレートを「本リポジトリの具体ExecPlan」に全面置換した。
+
+
+# ExecPlan: Serial Controller -> Motor Speed (Zenoh)
+
+このExecPlanは living document です。実装中は `Progress` / `Surprises & Discoveries` / `Decision Log` / `Outcomes & Retrospective` を必ず更新し、途中停止してもこの1ファイルだけで再開できる状態を維持します。
+
+
+## Purpose / Big Picture
+
+USBシリアル接続されたコントローラ（`docs/serial-communication-spec.md`）の左右コマンドを読み取り、Zenoh の `dmc_robo/<robot_id>/motor/cmd` に速度指令として publish できるようにします。目的は「キーボードではなく専用コントローラでモータ速度を操作」できることです。
+
+成果の「動いた」は、コントローラを動かすとシリアルで `L:<left>,R:<right>` が流れ、それが `motor/cmd` の `v_l` / `v_r` に反映され、ロボット側の `motor/telemetry` で追従が確認できることです。
+
+
+## Progress
+
+- [x] (2026-01-02) `docs/serial-communication-spec.md` を読み、入力レンジと注意点（`L:` 以外は無視）を把握した。
+- [x] (2026-01-02) シリアル → motor/cmd の最小ブリッジを実装した（`serial_motor_bridge.py`）。
+- [x] (2026-01-02) 停止（ゼロ指令）と deadman を確実に送る終了処理を実装した。
+- [x] (2026-01-02) ドキュメント（起動方法・キャリブレーション注意）を追加した（`docs/serial_controller.md`）。
+
+
+## Surprises & Discoveries
+
+（未記入。判明したことがあれば追記する）
+
+
+## Decision Log
+
+- Decision: 専用のブリッジCLI（例: `serial_motor_bridge.py`）を追加し、UIとは独立に動作させる。
+  Rationale: 既存の `remote_zenoh_ui.py` への影響を最小化し、常駐プロセスとして扱いやすい。
+  Date/Author: 2026-01-02 / Codex
+
+- Decision: コントローラの raw 値は `-2000..2000` まで取り得るため、`raw_max` と `max_mps` を設定で持ち、`v = (raw/raw_max) * max_mps` でマッピングする。
+  Rationale: L/R ボタンによる倍増値を安全に吸収しつつ、ロボット側の速度単位（mps）に合わせる。
+  Date/Author: 2026-01-02 / Codex
+
+
+## Plan of Work
+
+1) 既存の Zenoh 接続オプション（`docs/remote_zenoh_tool.py` と同等）を踏襲し、シリアル入力を motor/cmd に変換して publish する最小CLIを設計する。
+2) シリアル入力のパース（`L:` で始まる行のみ）と、`left/right` の数値抽出・バリデーションを実装する。
+3) raw 値を速度（mps）へ変換し、`motor/cmd` の JSON payload を生成して送信する。
+4) 例外・切断・終了時にゼロ指令（`v_l=0, v_r=0`）を必ず送る（deadman_ms を含める）。
+5) ドキュメントを追加し、接続方法・キャリブレーション手順・トラブルシュートを明記する。
+
+
+## Concrete Steps
+
+1) シリアル入力仕様を確認する。
+   - `docs/serial-communication-spec.md` の `L:<left>,R:<right>` 行フォーマット、範囲、dead zone、L/R 倍増の扱いを確認する。
+2) 新規CLIを追加する。
+   - ファイル案: `serial_motor_bridge.py`
+   - 引数: `--robot-id`, `--zenoh-config`, `--connect`, `--mode`, `--serial`, `--baud`, `--raw-max`, `--max-mps`, `--deadman-ms`
+   - `pyserial` を追加依存にする（`requirements.txt` に追記）
+3) パーサとマッピングを実装する。
+   - `L:` で始まらない行は無視。
+   - `left/right` を int で抽出、異常値は clamp。
+   - `v_l/v_r` を `raw_max` と `max_mps` で正規化。
+4) 送信・停止処理を実装する。
+   - 行受信ごとに `motor/cmd` を publish。
+   - Ctrl-C/例外/シリアル切断時に `v_l=0, v_r=0` を送る。
+5) ドキュメント更新。
+   - `docs/remote_ui.md` か新規 `docs/serial_controller.md` に起動方法と検証手順を追加。
+
+
+## Validation and Acceptance
+
+1) シリアル入力を模擬したログ（`L:250,R:240` 等）でパーサが正しく数値を抽出できる。
+2) 実機接続で `motor/cmd` が ~100 Hz で送信され、`motor/telemetry` に追従が出る。
+3) シリアルが切断された場合、deadman により停止し、さらにブリッジ側からゼロ指令を送る。
+4) `L:` 以外のログ行が混ざってもクラッシュしない。
+
+
+## Interfaces and Dependencies
+
+- Serial: USB CDC, newline-delimited ASCII lines（`L:<left>,R:<right>`）
+- Zenoh: `dmc_robo/<robot_id>/motor/cmd` に JSON publish
+  - `v_l`, `v_r`, `unit="mps"`, `deadman_ms`, `seq`, `ts_ms`
+- 依存: `pyserial` を追加
+- 設定: `config.toml` に `controller` セクション（`serial`, `raw_max`, `max_mps`, `deadman_ms`）を追加する案
+
+
+## Outcomes & Retrospective
+
+（未完了。実装が進んだら追記する）
+
+
+---
+
+変更メモ（このファイル自体の改訂理由）:
+
+- 2026-01-02: 追加の要件（シリアルコントローラで motor/cmd を操作）に対応するExecPlanを追記した。
